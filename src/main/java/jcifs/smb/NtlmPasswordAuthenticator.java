@@ -25,6 +25,7 @@ import java.security.MessageDigest;
 import java.security.Principal;
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.Set;
 
@@ -351,8 +352,8 @@ public class NtlmPasswordAuthenticator implements Principal, CredentialsInternal
     public boolean equals ( Object obj ) {
         if ( obj instanceof NtlmPasswordAuthenticator ) {
             NtlmPasswordAuthenticator ntlm = (NtlmPasswordAuthenticator) obj;
-            String domA = ntlm.getUserDomain() != null ? ntlm.getUserDomain().toUpperCase() : null;
-            String domB = this.getUserDomain() != null ? this.getUserDomain().toUpperCase() : null;
+            String domA = ntlm.getUserDomain() != null ? ntlm.getUserDomain().toUpperCase(Locale.ROOT) : null;
+            String domB = this.getUserDomain() != null ? this.getUserDomain().toUpperCase(Locale.ROOT) : null;
             return ntlm.type == this.type && Objects.equals(domA, domB) && ntlm.getUsername().equalsIgnoreCase(this.getUsername())
                     && Objects.equals(getPassword(), ntlm.getPassword());
         }
@@ -365,7 +366,7 @@ public class NtlmPasswordAuthenticator implements Principal, CredentialsInternal
      */
     @Override
     public int hashCode () {
-        return getName().toUpperCase().hashCode();
+        return getName().toUpperCase(Locale.ROOT).hashCode();
     }
 
 
@@ -581,8 +582,8 @@ public class NtlmPasswordAuthenticator implements Principal, CredentialsInternal
                 }
 
                 MessageDigest hmac = Crypto.getHMACT64(ntHash);
-                hmac.update(Strings.getUNIBytes(this.username.toUpperCase()));
-                hmac.update(Strings.getUNIBytes(this.domain.toUpperCase()));
+                hmac.update(Strings.getUNIBytes(this.username.toUpperCase(Locale.ROOT)));
+                hmac.update(Strings.getUNIBytes(this.domain.toUpperCase(Locale.ROOT)));
                 byte[] ntlmv2Hash = hmac.digest();
                 hmac = Crypto.getHMACT64(ntlmv2Hash);
                 hmac.update(chlng);
