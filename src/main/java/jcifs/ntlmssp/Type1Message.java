@@ -21,6 +21,7 @@ package jcifs.ntlmssp;
 
 
 import java.io.IOException;
+import java.util.Locale;
 
 import jcifs.CIFSContext;
 
@@ -144,7 +145,7 @@ public class Type1Message extends NtlmMessage {
             String suppliedDomainString = getSuppliedDomain();
             if ( ( flags & NTLMSSP_NEGOTIATE_VERSION ) == 0 && suppliedDomainString != null && suppliedDomainString.length() != 0 ) {
                 flags |= NTLMSSP_NEGOTIATE_OEM_DOMAIN_SUPPLIED;
-                domain = suppliedDomainString.toUpperCase().getBytes(getOEMEncoding());
+                domain = suppliedDomainString.toUpperCase(Locale.ROOT).getBytes(getOEMEncoding());
                 size += domain.length;
             }
             else {
@@ -155,7 +156,7 @@ public class Type1Message extends NtlmMessage {
             String suppliedWorkstationString = getSuppliedWorkstation();
             if ( ( flags & NTLMSSP_NEGOTIATE_VERSION ) == 0 && suppliedWorkstationString != null && suppliedWorkstationString.length() != 0 ) {
                 flags |= NTLMSSP_NEGOTIATE_OEM_WORKSTATION_SUPPLIED;
-                workstation = suppliedWorkstationString.toUpperCase().getBytes(getOEMEncoding());
+                workstation = suppliedWorkstationString.toUpperCase(Locale.ROOT).getBytes(getOEMEncoding());
                 size += workstation.length;
             }
             else {

@@ -25,6 +25,7 @@ import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Locale;
 
 import javax.crypto.Cipher;
 
@@ -626,14 +627,14 @@ public class Type3Message extends NtlmMessage {
         String userName = getUser();
         byte[] userBytes = null;
         if ( userName != null && userName.length() != 0 ) {
-            userBytes = unicode ? userName.getBytes(UNI_ENCODING) : userName.toUpperCase().getBytes(oemCp);
+            userBytes = unicode ? userName.getBytes(UNI_ENCODING) : userName.toUpperCase(Locale.ROOT).getBytes(oemCp);
             size += userBytes.length;
         }
 
         String workstationName = getWorkstation();
         byte[] workstationBytes = null;
         if ( workstationName != null && workstationName.length() != 0 ) {
-            workstationBytes = unicode ? workstationName.getBytes(UNI_ENCODING) : workstationName.toUpperCase().getBytes(oemCp);
+            workstationBytes = unicode ? workstationName.getBytes(UNI_ENCODING) : workstationName.toUpperCase(Locale.ROOT).getBytes(oemCp);
             size += workstationBytes.length;
         }
 
