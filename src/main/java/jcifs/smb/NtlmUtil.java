@@ -20,6 +20,7 @@ package jcifs.smb;
 
 import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
+import java.util.Locale;
 
 import javax.crypto.Cipher;
 import javax.crypto.ShortBufferException;
@@ -118,7 +119,7 @@ public final class NtlmUtil {
      */
     public static byte[] nTOWFv2 ( String domain, String username, byte[] passwordHash ) {
         MessageDigest hmac = Crypto.getHMACT64(passwordHash);
-        hmac.update(Strings.getUNIBytes(username.toUpperCase()));
+        hmac.update(Strings.getUNIBytes(username.toUpperCase(Locale.ROOT)));
         hmac.update(Strings.getUNIBytes(domain));
         return hmac.digest();
     }
@@ -214,8 +215,8 @@ public final class NtlmUtil {
             throws GeneralSecurityException {
         byte[] response = new byte[24];
         MessageDigest hmac = Crypto.getHMACT64(passwordHash);
-        hmac.update(Strings.getUNIBytes(user.toUpperCase()));
-        hmac.update(Strings.getUNIBytes(domain.toUpperCase()));
+        hmac.update(Strings.getUNIBytes(user.toUpperCase(Locale.ROOT)));
+        hmac.update(Strings.getUNIBytes(domain.toUpperCase(Locale.ROOT)));
         hmac = Crypto.getHMACT64(hmac.digest());
         hmac.update(challenge);
         hmac.update(clientChallenge);

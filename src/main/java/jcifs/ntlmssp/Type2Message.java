@@ -22,6 +22,7 @@ package jcifs.ntlmssp;
 
 import java.io.IOException;
 import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
 
 import org.slf4j.Logger;
@@ -332,7 +333,7 @@ public class Type2Message extends NtlmMessage {
         if ( getFlag(NTLMSSP_REQUEST_TARGET) ) {
             if ( targetName != null && targetName.length() != 0 ) {
                 targetBytes = ( flags & NTLMSSP_NEGOTIATE_UNICODE ) != 0 ? targetName.getBytes(UNI_ENCODING)
-                        : targetName.toUpperCase().getBytes(getOEMEncoding());
+                        : targetName.toUpperCase(Locale.ROOT).getBytes(getOEMEncoding());
                 size += targetBytes.length;
             }
             else {
