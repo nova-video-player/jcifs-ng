@@ -20,6 +20,8 @@
 package jcifs.netbios;
 
 
+import java.util.Locale;
+
 import jcifs.Configuration;
 import jcifs.NetbiosName;
 import jcifs.util.Hexdump;
@@ -99,7 +101,7 @@ public class Name implements NetbiosName {
         if ( name.length() > 15 ) {
             name = name.substring(0, 15);
         }
-        this.name = name.toUpperCase();
+        this.name = name.toUpperCase(Locale.ROOT);
         this.hexCode = hexCode;
         this.scope = scope != null && scope.length() > 0 ? scope : cfg.getNetbiosScope();
         this.srcHashCode = 0;

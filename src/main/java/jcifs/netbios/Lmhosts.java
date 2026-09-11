@@ -25,6 +25,7 @@ import java.io.FileReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.Reader;
+import java.util.Locale;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -96,7 +97,7 @@ public class Lmhosts {
         BufferedReader br = new BufferedReader(r);
 
         while ( ( line = br.readLine() ) != null ) {
-            line = line.toUpperCase().trim();
+            line = line.toUpperCase(Locale.ROOT).trim();
             if ( line.length() == 0 ) {
                 continue;
             }
@@ -121,7 +122,7 @@ public class Lmhosts {
                              */
 
                             while ( ( line = br.readLine() ) != null ) {
-                                line = line.toUpperCase().trim();
+                                line = line.toUpperCase(Locale.ROOT).trim();
                                 if ( line.startsWith("#END_ALTERNATE") ) {
                                     break;
                                 }

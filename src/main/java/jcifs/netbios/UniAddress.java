@@ -21,6 +21,7 @@ package jcifs.netbios;
 
 import java.net.InetAddress;
 import java.net.UnknownHostException;
+import java.util.Locale;
 
 import jcifs.Address;
 import jcifs.CIFSContext;
@@ -170,13 +171,13 @@ public class UniAddress implements Address {
         else {
             int i = this.calledName.indexOf('.');
             if ( i > 1 && i < 15 ) {
-                this.calledName = this.calledName.substring(0, i).toUpperCase();
+                this.calledName = this.calledName.substring(0, i).toUpperCase(Locale.ROOT);
             }
             else if ( this.calledName.length() > 15 ) {
                 this.calledName = NbtAddress.SMBSERVER_NAME;
             }
             else {
-                this.calledName = this.calledName.toUpperCase();
+                this.calledName = this.calledName.toUpperCase(Locale.ROOT);
             }
         }
 

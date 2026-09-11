@@ -21,6 +21,7 @@ package jcifs.internal.smb1.net;
 
 
 import java.io.UnsupportedEncodingException;
+import java.util.Locale;
 
 import jcifs.Configuration;
 import jcifs.internal.smb1.trans.SmbComTransaction;
@@ -107,9 +108,9 @@ public class NetServerEnum2 extends SmbComTransaction {
         dstIndex += 2;
         SMBUtil.writeInt4(this.serverTypes, dst, dstIndex);
         dstIndex += 4;
-        dstIndex += writeString(this.domain.toUpperCase(), dst, dstIndex, false);
+        dstIndex += writeString(this.domain.toUpperCase(Locale.ROOT), dst, dstIndex, false);
         if ( which == 1 ) {
-            dstIndex += writeString(this.lastName.toUpperCase(), dst, dstIndex, false);
+            dstIndex += writeString(this.lastName.toUpperCase(Locale.ROOT), dst, dstIndex, false);
         }
 
         return dstIndex - start;

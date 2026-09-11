@@ -21,6 +21,7 @@ package jcifs.smb;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.net.UnknownHostException;
+import java.util.Locale;
 import java.util.Objects;
 
 import org.slf4j.Logger;
@@ -689,9 +690,9 @@ class SmbResourceLocatorImpl implements SmbResourceLocatorInternal, Cloneable {
             hash = getAddress().hashCode();
         }
         catch ( CIFSException uhe ) {
-            hash = getServer().toUpperCase().hashCode();
+            hash = getServer().toUpperCase(Locale.ROOT).hashCode();
         }
-        return hash + getURLPath().toUpperCase().hashCode();
+        return hash + getURLPath().toUpperCase(Locale.ROOT).hashCode();
     }
 
 

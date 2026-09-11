@@ -122,7 +122,7 @@ public class DfsImpl implements DfsResolver {
                     DfsReferralDataInternal start = initial.unwrap(DfsReferralDataInternal.class);
                     DfsReferralDataInternal dr = start;
                     do {
-                        String domain = dr.getServer().toLowerCase();
+                        String domain = dr.getServer().toLowerCase(Locale.ROOT);
                         entry.map.put(domain, new HashMap<String, CacheEntry<DfsReferralDataInternal>>());
                         if ( log.isTraceEnabled() ) {
                             log.trace("Inserting cache entry for domain " + domain + ": " + dr);
@@ -337,7 +337,7 @@ public class DfsImpl implements DfsResolver {
             return null;
         }
 
-        domain = domain.toLowerCase();
+        domain = domain.toLowerCase(Locale.ROOT);
 
         if ( log.isTraceEnabled() ) {
             log.trace(String.format("Resolving \\%s\\%s%s", domain, root, path != null ? path : ""));
@@ -355,7 +355,7 @@ public class DfsImpl implements DfsResolver {
                     dumpReferralCache(domains);
                 }
 
-                root = root.toLowerCase();
+                root = root.toLowerCase(Locale.ROOT);
                 /*
                  * domain-based DFS root shares to links for each
                  */

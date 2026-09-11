@@ -20,6 +20,7 @@ package jcifs.internal.smb1.com;
 
 
 import java.security.GeneralSecurityException;
+import java.util.Locale;
 
 import jcifs.CIFSContext;
 import jcifs.Configuration;
@@ -67,8 +68,8 @@ public class SmbComSessionSetupAndX extends AndXServerMessageBlock {
                     if ( a.isGuest() ) {
                         this.accountName = a.getUsername();
                         if ( this.isUseUnicode() )
-                            this.accountName = this.accountName.toUpperCase();
-                        this.primaryDomain = a.getUserDomain() != null ? a.getUserDomain().toUpperCase() : "?";
+                            this.accountName = this.accountName.toUpperCase(Locale.ROOT);
+                        this.primaryDomain = a.getUserDomain() != null ? a.getUserDomain().toUpperCase(Locale.ROOT) : "?";
                     }
                     else {
                         this.accountName = "";
@@ -78,8 +79,8 @@ public class SmbComSessionSetupAndX extends AndXServerMessageBlock {
                 else {
                     this.accountName = a.getUsername();
                     if ( this.isUseUnicode() )
-                        this.accountName = this.accountName.toUpperCase();
-                    this.primaryDomain = a.getUserDomain() != null ? a.getUserDomain().toUpperCase() : "?";
+                        this.accountName = this.accountName.toUpperCase(Locale.ROOT);
+                    this.primaryDomain = a.getUserDomain() != null ? a.getUserDomain().toUpperCase(Locale.ROOT) : "?";
                     if ( server.encryptedPasswords ) {
                         this.lmHash = a.getAnsiHash(tc, server.encryptionKey);
                         this.ntHash = a.getUnicodeHash(tc, server.encryptionKey);
@@ -116,8 +117,8 @@ public class SmbComSessionSetupAndX extends AndXServerMessageBlock {
                 if ( !a.isAnonymous() ) {
                     this.accountName = a.getUsername();
                     if ( this.isUseUnicode() )
-                        this.accountName = this.accountName.toUpperCase();
-                    this.primaryDomain = a.getUserDomain() != null ? a.getUserDomain().toUpperCase() : "?";
+                        this.accountName = this.accountName.toUpperCase(Locale.ROOT);
+                    this.primaryDomain = a.getUserDomain() != null ? a.getUserDomain().toUpperCase(Locale.ROOT) : "?";
                 }
                 else {
                     this.accountName = "";

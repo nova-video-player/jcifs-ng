@@ -341,10 +341,10 @@ public class DfsReferralDataImpl implements DfsReferralDataInternal {
         if ( ( dr.rflags & Trans2GetDfsReferralResponse.FLAGS_NAME_LIST_REFERRAL ) == Trans2GetDfsReferralResponse.FLAGS_NAME_LIST_REFERRAL ) {
             String[] expandedNames = ref.getExpandedNames();
             if ( expandedNames.length > 0 ) {
-                dr.server = expandedNames[ 0 ].substring(1).toLowerCase();
+                dr.server = expandedNames[ 0 ].substring(1).toLowerCase(Locale.ROOT);
             }
             else {
-                dr.server = ref.getSpecialName().substring(1).toLowerCase();
+                dr.server = ref.getSpecialName().substring(1).toLowerCase(Locale.ROOT);
             }
             if ( log.isDebugEnabled() ) {
                 log.debug("Server " + dr.server + " path " + reqPath + " remain " + reqPath.substring(consumed) + " path consumed " + consumed);

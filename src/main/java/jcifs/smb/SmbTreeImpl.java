@@ -26,6 +26,7 @@ import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -99,7 +100,7 @@ class SmbTreeImpl implements SmbTreeInternal {
 
     SmbTreeImpl ( SmbSessionImpl session, String share, String service ) {
         this.session = session.acquire();
-        this.share = share.toUpperCase();
+        this.share = share.toUpperCase(Locale.ROOT);
         if ( service != null && !service.startsWith("??") ) {
             this.service = service;
         }

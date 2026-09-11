@@ -21,6 +21,7 @@ package jcifs;
 
 import java.net.InetAddress;
 import java.net.UnknownHostException;
+import java.util.Locale;
 import java.util.Properties;
 import java.util.StringTokenizer;
 
@@ -168,7 +169,7 @@ public class Config {
     public static boolean getBoolean ( Properties props, String key, boolean def ) {
         String b = props.getProperty(key);
         if ( b != null ) {
-            def = b.toLowerCase().equals("true");
+            def = b.toLowerCase(Locale.ROOT).equals("true");
         }
         return def;
     }
