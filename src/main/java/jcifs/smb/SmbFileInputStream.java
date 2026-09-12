@@ -455,7 +455,18 @@ public class SmbFileInputStream extends InputStream {
             this.raLen = chunk.length;
         }
 
-        if ( this.raPending == null ) {
+        // Only prefetch ahead of a full block: a short read (raLen < blockSize) means the
+        // server had less than a full block available at that offset, which in practice means
+        // EOF is at or very near the position just served - the same assumption
+        // readDirectLegacy's own loop makes via its "n == r" continuation check. Submitting a
+        // prefetch there would, for the common case of many small files (e.g. during a network
+        // share scan/scrape touching lots of small NFO/thumbnail files), cost an extra SMB2
+        // round trip plus a wasted blockSize-sized allocation and background thread per file,
+        // for a read-ahead that can never pay off since there is no further data to hide
+        // latency behind. If more data does turn out to be available after all, the next call
+        // simply falls back to a synchronous fetch once raBuf is exhausted, exactly as it would
+        // without pipelining.
+        if ( this.raPending == null && this.raLen == blockSize ) {
             long nextFp = this.fp + ( this.raLen - this.raPos );
             this.raPending = submitPrefetch(fd, nextFp, blockSize);
         }
