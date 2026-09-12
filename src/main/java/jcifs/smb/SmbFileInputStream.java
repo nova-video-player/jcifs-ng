@@ -445,7 +445,30 @@ public class SmbFileInputStream extends InputStream {
             // clearing the field afterwards cannot turn this into a null-pointer access
             Future<byte[]> pending = this.raPending;
             this.raPending = null;
-            byte[] chunk = ( pending != null ) ? awaitPending(pending) : readChunk0(fd, th, this.fp, blockSize);
+            byte[] chunk;
+            if ( pending != null ) {
+                chunk = awaitPending(pending);
+            }
+            else {
+                // Size this synchronous, non-prefetched fetch against the file size observed at
+                // open time rather than always requesting a full negotiated block:
+                // for a small file (e.g. an NFO/thumbnail during a network share scan/scrape)
+                // this avoids allocating a full blockSize (potentially 1MB+) buffer just to
+                // discard almost all of it. Background prefetches below remain sized to a full
+                // block, since they are only ever triggered once a full block has actually been
+                // observed (see the raLen == blockSize check below).
+                //
+                // The size observed at open time is only ever used here to size the request when
+                // there is confidently more data (primeFetchSize() > 0) - it is never used to
+                // infer EOF. The stream is opened with FILE_SHARE_WRITE, so a concurrent writer
+                // can extend the file after open; when the hint says nothing more should be left
+                // (primeFetchSize() <= 0) a real request is still sent to the server sized to a
+                // full block, and EOF is only ever latched below based on what the server itself
+                // reports (chunk == null), never based on the hint alone.
+                int primeSize = primeFetchSize(fd, blockSize);
+                int fetchSize = ( primeSize > 0 ) ? primeSize : blockSize;
+                chunk = readChunk0(fd, th, this.fp, fetchSize);
+            }
             if ( chunk == null ) {
                 this.raEof = true;
                 return -1;
@@ -456,16 +479,16 @@ public class SmbFileInputStream extends InputStream {
         }
 
         // Only prefetch ahead of a full block: a short read (raLen < blockSize) means the
-        // server had less than a full block available at that offset, which in practice means
-        // EOF is at or very near the position just served - the same assumption
-        // readDirectLegacy's own loop makes via its "n == r" continuation check. Submitting a
-        // prefetch there would, for the common case of many small files (e.g. during a network
-        // share scan/scrape touching lots of small NFO/thumbnail files), cost an extra SMB2
-        // round trip plus a wasted blockSize-sized allocation and background thread per file,
-        // for a read-ahead that can never pay off since there is no further data to hide
-        // latency behind. If more data does turn out to be available after all, the next call
-        // simply falls back to a synchronous fetch once raBuf is exhausted, exactly as it would
-        // without pipelining.
+        // server had less than a full block available at that offset, which is a strong (though
+        // not absolute) signal that EOF is at or very near the position just served - the same
+        // assumption readDirectLegacy's own loop makes via its "n == r" continuation check.
+        // Submitting a prefetch there would, for the common case of many small files (e.g.
+        // during a network share scan/scrape touching lots of small NFO/thumbnail files), cost
+        // an extra SMB2 round trip plus a wasted blockSize-sized allocation and background
+        // thread per file, for a read-ahead that is very unlikely to pay off since there is
+        // usually no further data to hide latency behind. If more data does turn out to be
+        // available after all, the next call simply falls back to a synchronous fetch once
+        // raBuf is exhausted, exactly as it would without pipelining.
         if ( this.raPending == null && this.raLen == blockSize ) {
             long nextFp = this.fp + ( this.raLen - this.raPos );
             this.raPending = submitPrefetch(fd, nextFp, blockSize);
@@ -480,6 +503,37 @@ public class SmbFileInputStream extends InputStream {
             this.raBuf = null;
         }
         return n;
+    }
+
+
+    /**
+     * Computes how large a synchronous no-buffer/no-pending fetch for this stream/position
+     * should be, using the file size observed when the handle was opened
+     * ({@link SmbFileHandleImpl#getInitialSize()}) as a hint to avoid over-allocating for small
+     * files. This is called for every such fetch, not just the very first one in the stream's
+     * life (e.g. also after a {@link #skip(long)}-triggered drain, or whenever the previous
+     * chunk was a short read so no prefetch was queued).
+     * <p>
+     * This is only a sizing hint and must never be used to infer EOF: the file may have grown
+     * since the handle was opened (it is opened with {@code FILE_SHARE_WRITE}, so a concurrent
+     * writer can extend it), in which case a non-positive result here only means the hint has
+     * nothing left to offer - the caller still issues a real request to the server sized to a
+     * full block in that case, and only the server's own response can establish EOF.
+     *
+     * @return the number of bytes to request, sized to the remaining bytes reported at open
+     *         time, or {@code <= 0} if the current position is already at or past the size
+     *         observed at open time (the caller must still fetch a full block from the server
+     *         in that case rather than assuming EOF)
+     */
+    private int primeFetchSize ( SmbFileHandleImpl fd, int blockSize ) {
+        long size = fd.getInitialSize();
+        long remaining = size - this.fp;
+        if ( remaining <= 0 ) {
+            // covers both a genuinely empty file (size == 0, fp == 0) and any position already
+            // at/past the size observed at open time
+            return 0;
+        }
+        return (int) Math.min(blockSize, remaining);
     }
 
 
