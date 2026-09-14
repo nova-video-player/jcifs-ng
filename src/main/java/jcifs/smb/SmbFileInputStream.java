@@ -27,6 +27,12 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.FutureTask;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -62,21 +68,36 @@ public class SmbFileInputStream extends InputStream {
 
     private boolean smb2;
 
-    // single-slot read-ahead pipeline, used for SMB2 filesystem reads only (see readPipelined).
-    // While the caller consumes raBuf, the next block is already being fetched in the
-    // background, overlapping network round-trip latency with the caller's processing time -
-    // this mirrors the equivalent read-ahead done by the smbj library. The prefetch is run on a
-    // short-lived daemon thread spawned per outstanding request (see submitPrefetch); since at
-    // most one prefetch is ever in flight at a time there is no benefit to a persistent
-    // executor, and this avoids any thread lingering for the lifetime of the stream.
-    // raEof is sticky for the lifetime of the stream once a chunk read (sync or prefetched)
-    // comes back empty - this class has no support for repositioning past a known EOF, so once
-    // observed it will always be the true end of the readable range.
+    // Reuse workers across streams/blocks, but bound speculative work and retain no idle
+    // workers indefinitely. With no queue, saturation simply disables that prefetch; the
+    // caller can fetch synchronously when it needs the next block.
+    private static final ThreadPoolExecutor READ_AHEAD = new ThreadPoolExecutor(0, 16, 30L, TimeUnit.SECONDS,
+        new SynchronousQueue<Runnable>(), new ThreadFactory() {
+            private final AtomicInteger sequence = new AtomicInteger();
+
+            @Override
+            public Thread newThread ( Runnable task ) {
+                Thread thread = new Thread(task, "jcifs-readahead-" + this.sequence.incrementAndGet());
+                thread.setDaemon(true);
+                return thread;
+            }
+        });
+
+    // Stream state is guarded by this; workers use only their pinned handle and offset.
     private byte[] raBuf;
     private int raLen;
     private int raPos;
-    private boolean raEof;
-    private Future<byte[]> raPending;
+    private Future<ReadChunk> raPending;
+
+    private static final class ReadChunk {
+        final byte[] data;
+        final int length;
+
+        ReadChunk ( byte[] data, int length ) {
+            this.data = data;
+            this.length = length;
+        }
+    }
 
 
     /**
@@ -194,6 +215,9 @@ public class SmbFileInputStream extends InputStream {
      * @throws SmbException
      */
     synchronized SmbFileHandleImpl ensureOpen () throws CIFSException {
+        if ( this.tmp == null ) {
+            throw new SmbException("Bad file descriptor");
+        }
         if ( this.handle == null || !this.handle.isValid() ) {
             // one extra acquire to keep this open till the stream is released
             if ( this.file instanceof SmbNamedPipe ) {
@@ -229,14 +253,15 @@ public class SmbFileInputStream extends InputStream {
 
 
     /**
-     * Closes this input stream and releases any system resources associated with the stream.
+     * Closes this input stream and releases its resources. Serialized with caller reads and
+     * skips; an independent prefetch releases its pinned handle when it finishes.
      *
      * @throws IOException
      *             if a network error occurs
      */
 
     @Override
-    public void close () throws IOException {
+    public synchronized void close () throws IOException {
         try {
             SmbFileHandleImpl h = this.handle;
             if ( h != null ) {
@@ -270,8 +295,10 @@ public class SmbFileInputStream extends InputStream {
      */
 
     @Override
-    public int read () throws IOException {
-        // need oplocks to cache otherwise use BufferedInputStream
+    public synchronized int read () throws IOException {
+        if ( this.tmp == null ) {
+            throw new IOException("Bad file descriptor");
+        }
         if ( read(this.tmp, 0, 1) == -1 ) {
             return -1;
         }
@@ -316,12 +343,23 @@ public class SmbFileInputStream extends InputStream {
      * @throws IOException
      *             if a network error occurs
      */
-    public int readDirect ( byte[] b, int off, int len ) throws IOException {
-        if ( len <= 0 ) {
+    public synchronized int readDirect ( byte[] b, int off, int len ) throws IOException {
+        if ( b == null ) {
+            throw new NullPointerException("buffer");
+        }
+        if ( off < 0 || len < 0 || off > b.length - len ) {
+            throw new IndexOutOfBoundsException();
+        }
+        if ( len == 0 ) {
             return 0;
         }
         if ( this.tmp == null ) {
             throw new IOException("Bad file descriptor");
+        }
+        if ( this.raBuf != null ) {
+            // Small caller reads consume the already-fetched block without repeatedly
+            // acquiring file/tree/session references or checking transport negotiation.
+            return readBuffered(b, off, len);
         }
         // ensure file is open
         try ( SmbFileHandleImpl fd = ensureOpen();
@@ -433,67 +471,51 @@ public class SmbFileInputStream extends InputStream {
      * processing (mirrors the read-ahead done by the smbj library).
      */
     private int readPipelined ( SmbFileHandleImpl fd, SmbTreeHandleImpl th, byte[] b, int off, int len ) throws IOException {
-        if ( this.raEof ) {
-            return -1;
-        }
-
         int blockSize = this.readSizeFile;
 
         if ( this.raBuf == null ) {
-            // snapshot into a local var before clearing the field: awaitPending() takes it as a
-            // parameter rather than re-reading this.raPending itself, so a concurrent close()
-            // clearing the field afterwards cannot turn this into a null-pointer access
-            Future<byte[]> pending = this.raPending;
-            this.raPending = null;
-            byte[] chunk;
+            Future<ReadChunk> pending = this.raPending;
+            ReadChunk chunk;
             if ( pending != null ) {
-                chunk = awaitPending(pending);
+                try {
+                    chunk = awaitPending(pending);
+                }
+                finally {
+                    // An interrupted wait does not cancel the worker. Keep ownership until
+                    // completion so retry/skip cannot submit overlapping reads.
+                    if ( pending.isDone() ) {
+                        this.raPending = null;
+                    }
+                }
             }
             else {
-                // Size this synchronous, non-prefetched fetch against the file size observed at
-                // open time rather than always requesting a full negotiated block:
-                // for a small file (e.g. an NFO/thumbnail during a network share scan/scrape)
-                // this avoids allocating a full blockSize (potentially 1MB+) buffer just to
-                // discard almost all of it. Background prefetches below remain sized to a full
-                // block, since they are only ever triggered once a full block has actually been
-                // observed (see the raLen == blockSize check below).
-                //
-                // The size observed at open time is only ever used here to size the request when
-                // there is confidently more data (primeFetchSize() > 0) - it is never used to
-                // infer EOF. The stream is opened with FILE_SHARE_WRITE, so a concurrent writer
-                // can extend the file after open; when the hint says nothing more should be left
-                // (primeFetchSize() <= 0) a real request is still sent to the server sized to a
-                // full block, and EOF is only ever latched below based on what the server itself
-                // reports (chunk == null), never based on the hint alone.
+                // Bound small-file allocations using the opening size, but still ask the
+                // server beyond that hint: the file may have grown since it was opened.
                 int primeSize = primeFetchSize(fd, blockSize);
                 int fetchSize = ( primeSize > 0 ) ? primeSize : blockSize;
                 chunk = readChunk0(fd, th, this.fp, fetchSize);
             }
             if ( chunk == null ) {
-                this.raEof = true;
+                // Do not latch EOF: a subsequent read may observe a concurrent append.
                 return -1;
             }
-            this.raBuf = chunk;
+            this.raBuf = chunk.data;
             this.raPos = 0;
             this.raLen = chunk.length;
+
+            // A short block (including a deliberately smaller request) usually means we
+            // are near EOF. Avoid speculation there, and attempt it only once per block
+            // if the worker pool is saturated.
+            if ( this.raLen == blockSize ) {
+                this.raPending = submitPrefetch(fd, this.fp + this.raLen, blockSize);
+            }
         }
 
-        // Only prefetch ahead of a full block: a short read (raLen < blockSize) means the
-        // server had less than a full block available at that offset, which is a strong (though
-        // not absolute) signal that EOF is at or very near the position just served - the same
-        // assumption readDirectLegacy's own loop makes via its "n == r" continuation check.
-        // Submitting a prefetch there would, for the common case of many small files (e.g.
-        // during a network share scan/scrape touching lots of small NFO/thumbnail files), cost
-        // an extra SMB2 round trip plus a wasted blockSize-sized allocation and background
-        // thread per file, for a read-ahead that is very unlikely to pay off since there is
-        // usually no further data to hide latency behind. If more data does turn out to be
-        // available after all, the next call simply falls back to a synchronous fetch once
-        // raBuf is exhausted, exactly as it would without pipelining.
-        if ( this.raPending == null && this.raLen == blockSize ) {
-            long nextFp = this.fp + ( this.raLen - this.raPos );
-            this.raPending = submitPrefetch(fd, nextFp, blockSize);
-        }
+        return readBuffered(b, off, len);
+    }
 
+
+    private int readBuffered ( byte[] b, int off, int len ) {
         int avail = this.raLen - this.raPos;
         int n = Math.min(avail, len);
         System.arraycopy(this.raBuf, this.raPos, b, off, n);
@@ -537,13 +559,15 @@ public class SmbFileInputStream extends InputStream {
     }
 
 
-    private byte[] awaitPending ( Future<byte[]> pending ) throws IOException {
+    private ReadChunk awaitPending ( Future<ReadChunk> pending ) throws IOException {
         try {
             return pending.get();
         }
         catch ( InterruptedException e ) {
             Thread.currentThread().interrupt();
-            throw new InterruptedIOException("Interrupted while waiting for read-ahead");
+            InterruptedIOException failure = new InterruptedIOException("Interrupted while waiting for read-ahead");
+            failure.initCause(e);
+            throw failure;
         }
         catch ( ExecutionException e ) {
             Throwable cause = e.getCause();
@@ -565,12 +589,12 @@ public class SmbFileInputStream extends InputStream {
      * underlying SMB handle/tree alive on the server until the prefetch itself finishes and
      * releases it in its {@code finally} block, whatever the outcome.
      */
-    private Future<byte[]> submitPrefetch ( SmbFileHandleImpl fd, final long atFp, final int blockSize ) {
+    private Future<ReadChunk> submitPrefetch ( SmbFileHandleImpl fd, final long atFp, final int blockSize ) {
         final SmbFileHandleImpl pinnedFd = fd.acquire();
-        FutureTask<byte[]> task = new FutureTask<>(new Callable<byte[]>() {
+        FutureTask<ReadChunk> task = new FutureTask<>(new Callable<ReadChunk>() {
 
             @Override
-            public byte[] call () throws IOException {
+            public ReadChunk call () throws IOException {
                 try ( SmbTreeHandleImpl pinnedTh = pinnedFd.getTree() ) {
                     return readChunk0(pinnedFd, pinnedTh, atFp, blockSize);
                 }
@@ -584,14 +608,30 @@ public class SmbFileInputStream extends InputStream {
                 }
             }
         });
-        Thread t = new Thread(task, "jcifs-readahead-" + System.identityHashCode(this));
-        t.setDaemon(true);
-        t.start();
-        return task;
+        boolean submitted = false;
+        try {
+            READ_AHEAD.execute(task);
+            submitted = true;
+            return task;
+        }
+        catch ( RejectedExecutionException e ) {
+            return null;
+        }
+        finally {
+            // Also release the pin if worker creation fails before accepting the task.
+            if ( !submitted ) {
+                try {
+                    pinnedFd.release();
+                }
+                catch ( CIFSException releaseError ) {
+                    log.debug("Failed to release unused read-ahead file handle", releaseError);
+                }
+            }
+        }
     }
 
 
-    private byte[] readChunk0 ( SmbFileHandleImpl fd, SmbTreeHandleImpl th, long atFp, int blockSize ) throws IOException {
+    private ReadChunk readChunk0 ( SmbFileHandleImpl fd, SmbTreeHandleImpl th, long atFp, int blockSize ) throws IOException {
         byte[] chunk = new byte[blockSize];
         Smb2ReadRequest request = new Smb2ReadRequest(th.getConfig(), fd.getFileId(), chunk, 0);
         request.setOffset(atFp);
@@ -613,21 +653,12 @@ public class SmbFileInputStream extends InputStream {
         if ( n <= 0 ) {
             return null;
         }
-        if ( n == chunk.length ) {
-            return chunk;
-        }
-        byte[] exact = new byte[n];
-        System.arraycopy(chunk, 0, exact, 0, n);
-        return exact;
+        return new ReadChunk(chunk, n);
     }
 
 
     /**
-     * This stream class is unbuffered. Therefore this method will always
-     * return 0 for streams connected to regular files. However, a
-     * stream created from a Named Pipe this method will query the server using a
-     * "peek named pipe" operation and return the number of available bytes
-     * on the server.
+     * Returns a conservative estimate of zero; does not query the server or wait for read-ahead.
      */
     @Override
     public int available () throws IOException {
@@ -641,14 +672,17 @@ public class SmbFileInputStream extends InputStream {
      * exceeds the end of the file (if this is a problem let us know).
      */
     @Override
-    public long skip ( long n ) throws IOException {
+    public synchronized long skip ( long n ) throws IOException {
         if ( n <= 0 ) {
             return 0;
         }
-        if ( this.raBuf != null && this.raPos + n <= this.raLen ) {
+        if ( this.raBuf != null && n <= this.raLen - this.raPos ) {
             // still within the currently buffered read-ahead block, no need to discard it
             this.raPos += (int) n;
             this.fp += n;
+            if ( this.raPos == this.raLen ) {
+                this.raBuf = null;
+            }
             return n;
         }
         // outside buffered data (or nothing buffered): the buffered block, if any, is stale and
@@ -678,7 +712,7 @@ public class SmbFileInputStream extends InputStream {
      * once the drain itself is complete, rather than aborting the wait early.
      */
     private void drainPending () {
-        Future<byte[]> pending = this.raPending;
+        Future<ReadChunk> pending = this.raPending;
         this.raPending = null;
         if ( pending == null ) {
             return;

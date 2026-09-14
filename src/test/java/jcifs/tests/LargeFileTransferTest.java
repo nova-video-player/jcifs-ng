@@ -18,9 +18,12 @@
 package jcifs.tests;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertArrayEquals;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
@@ -95,7 +98,7 @@ public class LargeFileTransferTest extends BaseCIFSTest {
     }
 
     @Test
-    public void testLargeTransfer() throws IOException {
+    public void testLargeTransfer() throws IOException, NoSuchAlgorithmException {
         String mode = (transportBufferSize > 65536) ? "MULTI-CREDIT (1MB)" : "SINGLE-CREDIT (64KB)";
         
         try (SmbFile f = createTestFile()) {
@@ -104,12 +107,17 @@ public class LargeFileTransferTest extends BaseCIFSTest {
             // Use a large application buffer to ensure we saturate the transport
             byte[] data = new byte[1024 * 1024]; 
             new Random().nextBytes(data);
+            MessageDigest writtenDigest = MessageDigest.getInstance("SHA-256");
+            MessageDigest readDigest = MessageDigest.getInstance("SHA-256");
             
             long startWrite = System.currentTimeMillis();
             try (OutputStream os = f.getOutputStream()) {
                 int written = 0;
                 while (written < FILE_SIZE) {
                     int toWrite = Math.min(data.length, FILE_SIZE - written);
+                    // Distinguish blocks so duplicates/reordering cannot pass integrity checks.
+                    data[0] = (byte) (written / data.length);
+                    writtenDigest.update(data, 0, toWrite);
                     os.write(data, 0, toWrite);
                     written += toWrite;
                 }
@@ -124,9 +132,11 @@ public class LargeFileTransferTest extends BaseCIFSTest {
                 long totalRead = 0;
                 int r;
                 while ((r = is.read(readBuf)) != -1) {
+                    readDigest.update(readBuf, 0, r);
                     totalRead += r;
                 }
                 assertEquals("Total bytes read should match", FILE_SIZE, totalRead);
+                assertArrayEquals("File contents should match", writtenDigest.digest(), readDigest.digest());
             }
             long endRead = System.currentTimeMillis();
             double readTimeSec = (endRead - startRead) / 1000.0;
