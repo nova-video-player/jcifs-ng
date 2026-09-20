@@ -855,29 +855,29 @@ class SmbTransportImpl extends Transport implements SmbTransportInternal, SmbCon
             return null;
         }
 
-        if ( this.sbuf[ 4 ] == (byte) 0xFE && this.sbuf[ 5 ] == (byte) 'S' && this.sbuf[ 6 ] == (byte) 'M' && this.sbuf[ 7 ] == (byte) 'B' ) {
-            this.smb2 = true;
-            this.lastSize = ( ( this.sbuf[ 1 ] & 0xFF ) << 16 ) | ( ( this.sbuf[ 2 ] & 0xFF ) << 8 ) | ( this.sbuf[ 3 ] & 0xFF );
-            /* also read the rest of the header */
-            int lenDiff = Smb2Constants.SMB2_HEADER_LENGTH - SmbConstants.SMB1_HEADER_LENGTH;
-            if ( readn(this.in, this.sbuf, 4 + SmbConstants.SMB1_HEADER_LENGTH, lenDiff) < lenDiff ) {
-                if ( log.isDebugEnabled() )
-                    log.debug("Failed to read SMB2 header part");
-                return null;
-            }
-            long mid = (long) Encdec.dec_uint64le(this.sbuf, 28);
-            if ( log.isTraceEnabled() ) {
-                log.trace("SMB2 message mid " + mid + " size " + this.lastSize);
-            }
-            return mid;
-        }
-
         if ( log.isTraceEnabled() ) {
             log.trace("New data read: " + this);
             log.trace(Hexdump.toHexString(this.sbuf, 4, 32));
         }
 
         for ( ;; ) {
+            if ( this.sbuf[ 0 ] == (byte) 0x00 && this.sbuf[ 4 ] == (byte) 0xFE && this.sbuf[ 5 ] == (byte) 'S' && this.sbuf[ 6 ] == (byte) 'M'
+                    && this.sbuf[ 7 ] == (byte) 'B' ) {
+                this.smb2 = true;
+                this.lastSize = ( ( this.sbuf[ 1 ] & 0xFF ) << 16 ) | ( ( this.sbuf[ 2 ] & 0xFF ) << 8 ) | ( this.sbuf[ 3 ] & 0xFF );
+                /* also read the rest of the header */
+                int lenDiff = Smb2Constants.SMB2_HEADER_LENGTH - SmbConstants.SMB1_HEADER_LENGTH;
+                if ( readn(this.in, this.sbuf, 4 + SmbConstants.SMB1_HEADER_LENGTH, lenDiff) < lenDiff ) {
+                    if ( log.isDebugEnabled() )
+                        log.debug("Failed to read SMB2 header part");
+                    return null;
+                }
+                long mid = (long) Encdec.dec_uint64le(this.sbuf, 28);
+                if ( log.isTraceEnabled() ) {
+                    log.trace("SMB2 message mid " + mid + " size " + this.lastSize);
+                }
+                return mid;
+            }
 
             if ( this.sbuf[ 0 ] == (byte) 0x00 && this.sbuf[ 4 ] == (byte) 0xFF && this.sbuf[ 5 ] == (byte) 'S' && this.sbuf[ 6 ] == (byte) 'M'
                     && this.sbuf[ 7 ] == (byte) 'B' ) {
@@ -1105,11 +1105,12 @@ class SmbTransportImpl extends Transport implements SmbTransportInternal, SmbCon
                     curReq = next;
                 }
                 if ( !isDisconnected() && !curReq.isResponseAsync() ) {
-                    int toRelease = Math.max(grantedCredits, totalCost);
+                    // Only the server can extend the message-id/credit window.
+                    // In particular, an interrupted request is not a credit refund.
                     if ( log.isTraceEnabled() ) {
-                        log.trace("Adding credits " + toRelease + " (granted " + grantedCredits + " cost " + totalCost + ")");
+                        log.trace("Adding credits " + grantedCredits);
                     }
-                    this.credits.release(toRelease);
+                    this.credits.release(grantedCredits);
                 }
             }
         }
@@ -1287,7 +1288,7 @@ class SmbTransportImpl extends Transport implements SmbTransportInternal, SmbCon
             cur = (ServerMessageBlock2Response) cur.getNextResponse();
             if ( cur == null ) {
                 log.warn("Response not properly set up");
-                this.in.skip(size);
+                skipFully(size);
                 break;
             }
 
@@ -1371,27 +1372,37 @@ class SmbTransportImpl extends Transport implements SmbTransportInternal, SmbCon
     @Override
     protected void doSkip ( Long key ) throws IOException {
         synchronized ( this.inLock ) {
-            int size = Encdec.dec_uint16be(this.sbuf, 2) & 0xFFFF;
-            if ( size < 33 || ( 4 + size ) > this.getContext().getConfig().getReceiveBufferSize() ) {
-                /* log message? */
-                log.warn("Flusing stream input");
-                this.in.skip(this.in.available());
+            // peekKey has consumed the header. SMB2 replies can exceed 64 KiB,
+            // including replies to requests whose waiting thread was interrupted.
+            int size = this.lastSize;
+            int headerSize = this.isSMB2() ? Smb2Constants.SMB2_HEADER_LENGTH : SmbConstants.SMB1_HEADER_LENGTH;
+            if ( size < headerSize + 1 ) {
+                throw new IOException("Invalid payload size: " + size);
+            }
+            Response notification = createNotification(key);
+            if ( notification != null ) {
+                log.debug("Parsing notification");
+                doRecv(notification);
+                handleNotification(notification);
+                return;
+            }
+            log.warn("Skipping message " + key + " (size=" + size + ")");
+            skipFully(size - headerSize);
+        }
+    }
+
+
+    private void skipFully ( int size ) throws IOException {
+        while ( size > 0 ) {
+            long skipped = this.in.skip(size);
+            if ( skipped > 0 ) {
+                size -= (int) skipped;
+            }
+            else if ( this.in.read() == -1 ) {
+                throw new EOFException("End of stream while skipping SMB message");
             }
             else {
-                Response notification = createNotification(key);
-                if ( notification != null ) {
-                    log.debug("Parsing notification");
-                    doRecv(notification);
-                    handleNotification(notification);
-                    return;
-                }
-                log.warn("Skipping message " + key);
-                if ( this.isSMB2() ) {
-                    this.in.skip(size - Smb2Constants.SMB2_HEADER_LENGTH);
-                }
-                else {
-                    this.in.skip(size - SmbConstants.SMB1_HEADER_LENGTH);
-                }
+                size--;
             }
         }
     }
