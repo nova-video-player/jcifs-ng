@@ -68,6 +68,8 @@ public class SmbFileInputStream extends InputStream {
 
     private boolean smb2;
 
+    private static final int EOF_PROBE_SIZE = 4096;
+
     // Reuse workers across streams/blocks, but bound speculative work and retain no idle
     // workers indefinitely. With no queue, saturation simply disables that prefetch; the
     // caller can fetch synchronously when it needs the next block.
@@ -253,8 +255,9 @@ public class SmbFileInputStream extends InputStream {
 
 
     /**
-     * Closes this input stream and releases its resources. Serialized with caller reads and
-     * skips; an independent prefetch releases its pinned handle when it finishes.
+     * Closes this input stream and releases its resources. Waits for an outstanding prefetch
+     * before closing the remote handle, so its sharing restrictions are gone on return.
+     * Interruption is preserved, but does not abandon cleanup or interrupt the SMB CLOSE.
      *
      * @throws IOException
      *             if a network error occurs
@@ -262,7 +265,26 @@ public class SmbFileInputStream extends InputStream {
 
     @Override
     public synchronized void close () throws IOException {
+        boolean interrupted = Thread.interrupted();
         try {
+            Future<ReadChunk> pending = this.raPending;
+            if ( pending != null ) {
+                for ( ;; ) {
+                    try {
+                        pending.get();
+                        break;
+                    }
+                    catch ( InterruptedException e ) {
+                        interrupted = true;
+                    }
+                    catch ( ExecutionException e ) {
+                        log.debug("Discarding failed read-ahead on close", e);
+                        break;
+                    }
+                }
+            }
+            // The worker releases its pin before completing the future. The stream's
+            // final release can now close the server handle before reporting success.
             SmbFileHandleImpl h = this.handle;
             if ( h != null ) {
                 h.close();
@@ -274,14 +296,17 @@ public class SmbFileInputStream extends InputStream {
         finally {
             this.tmp = null;
             this.handle = null;
-            // Any outstanding read-ahead prefetch (see submitPrefetch) holds its own pinned
-            // acquire()'d reference to the file handle/tree, independent of this.handle - it is
-            // left to finish on its own background thread and release that reference itself
-            // when done; we only drop our local view of it and discard its eventual result.
             this.raBuf = null;
             this.raPending = null;
-            if ( this.unsharedFile ) {
-                this.file.close();
+            try {
+                if ( this.unsharedFile ) {
+                    this.file.close();
+                }
+            }
+            finally {
+                if ( interrupted ) {
+                    Thread.currentThread().interrupt();
+                }
             }
         }
     }
@@ -492,7 +517,7 @@ public class SmbFileInputStream extends InputStream {
                 // Bound small-file allocations using the opening size, but still ask the
                 // server beyond that hint: the file may have grown since it was opened.
                 int primeSize = primeFetchSize(fd, blockSize);
-                int fetchSize = ( primeSize > 0 ) ? primeSize : blockSize;
+                int fetchSize = ( primeSize > 0 ) ? primeSize : Math.min(blockSize, Math.min(len, EOF_PROBE_SIZE));
                 chunk = readChunk0(fd, th, this.fp, fetchSize);
             }
             if ( chunk == null ) {
@@ -539,12 +564,12 @@ public class SmbFileInputStream extends InputStream {
      * This is only a sizing hint and must never be used to infer EOF: the file may have grown
      * since the handle was opened (it is opened with {@code FILE_SHARE_WRITE}, so a concurrent
      * writer can extend it), in which case a non-positive result here only means the hint has
-     * nothing left to offer - the caller still issues a real request to the server sized to a
-     * full block in that case, and only the server's own response can establish EOF.
+     * nothing left to offer - the caller still issues a bounded probe to the server in that
+     * case, and only the server's own response can establish EOF.
      *
      * @return the number of bytes to request, sized to the remaining bytes reported at open
      *         time, or {@code <= 0} if the current position is already at or past the size
-     *         observed at open time (the caller must still fetch a full block from the server
+     *         observed at open time (the caller must still probe the server
      *         in that case rather than assuming EOF)
      */
     private int primeFetchSize ( SmbFileHandleImpl fd, int blockSize ) {
@@ -584,10 +609,9 @@ public class SmbFileInputStream extends InputStream {
      * pinned via a ref-counted {@link SmbFileHandleImpl#acquire()} *before* returning to the
      * caller, and the tree is likewise acquired lazily by the background thread off of that
      * pinned handle - the prefetch never calls {@link #ensureOpen()}, so it can never reopen a
-     * new handle after the stream has been closed. Closing the stream drops the stream's own
-     * reference immediately (see {@link #close()}), but this pinned reference keeps the
-     * underlying SMB handle/tree alive on the server until the prefetch itself finishes and
-     * releases it in its {@code finally} block, whatever the outcome.
+     * new handle after the stream has been closed. Closing the stream waits for the prefetch
+     * to release its pin in the {@code finally} block, then drops the stream's own reference
+     * to close the remote handle.
      */
     private Future<ReadChunk> submitPrefetch ( SmbFileHandleImpl fd, final long atFp, final int blockSize ) {
         final SmbFileHandleImpl pinnedFd = fd.acquire();
@@ -685,15 +709,11 @@ public class SmbFileInputStream extends InputStream {
             }
             return n;
         }
-        // outside buffered data (or nothing buffered): the buffered block, if any, is stale and
-        // dropped. Any outstanding prefetch is drained (not force-cancelled - interrupting it
-        // could abort an in-flight socket write/read in an undefined state) before its
-        // reference is dropped, so that only one read-ahead is ever in flight for this stream
-        // at a time; without this, repeated skip()+read() could otherwise pile up multiple
-        // concurrent background requests. This does not itself issue any new request to the
-        // server, it only waits for one that was already in flight.
-        this.raBuf = null;
+        // Drain before changing position or discarding buffered bytes. An interrupted
+        // wait leaves all stream state intact and keeps ownership of the pending read.
+        // The worker is not interrupted, and no replacement read can overlap it.
         drainPending();
+        this.raBuf = null;
         this.fp += n;
         return n;
     }
@@ -705,38 +725,27 @@ public class SmbFileInputStream extends InputStream {
      * most one prefetch is ever in flight for this stream, when the buffered read-ahead is
      * abandoned (see {@link #skip(long)}) rather than being naturally consumed by
      * {@link #readPipelined}.
-     * <p>
-     * Waits uninterruptibly: the prefetch must be known to have finished before this method
-     * returns, in order to guarantee the field is not cleared while it's still outstanding, so an
-     * interrupt received while waiting is recorded and re-applied to the calling thread only
-     * once the drain itself is complete, rather than aborting the wait early.
+     * If interrupted, leaves the pending future attached so a later read, skip or close
+     * can finish waiting for the same request.
      */
-    private void drainPending () {
+    private void drainPending () throws InterruptedIOException {
         Future<ReadChunk> pending = this.raPending;
-        this.raPending = null;
         if ( pending == null ) {
             return;
         }
-        boolean interrupted = false;
         try {
-            while ( true ) {
-                try {
-                    pending.get();
-                    break;
-                }
-                catch ( InterruptedException e ) {
-                    interrupted = true;
-                }
-            }
+            pending.get();
+        }
+        catch ( InterruptedException e ) {
+            Thread.currentThread().interrupt();
+            InterruptedIOException failure = new InterruptedIOException("Interrupted while discarding read-ahead");
+            failure.initCause(e);
+            throw failure;
         }
         catch ( ExecutionException e ) {
             log.debug("Discarding failed stale read-ahead", e);
         }
-        finally {
-            if ( interrupted ) {
-                Thread.currentThread().interrupt();
-            }
-        }
+        this.raPending = null;
     }
 
 }
