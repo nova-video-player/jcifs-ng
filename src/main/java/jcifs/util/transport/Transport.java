@@ -243,7 +243,20 @@ public abstract class Transport implements Runnable, AutoCloseable {
             throw ioe;
         }
         catch ( InterruptedException ie ) {
-            throw new TransportException(ie);
+            TransportException interrupted = new TransportException(ie);
+            try {
+                // The request has already been sent. Removing its response below
+                // would discard a late reply, including any SMB2 credit grant.
+                // Retire the connection instead of reusing an incomplete credit window.
+                disconnect(true);
+            }
+            catch ( IOException ioe ) {
+                interrupted.addSuppressed(ioe);
+            }
+            finally {
+                Thread.currentThread().interrupt();
+            }
+            throw interrupted;
         }
         finally {
             Response curResp = response;
