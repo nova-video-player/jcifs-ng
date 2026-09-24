@@ -80,6 +80,7 @@ import jcifs.internal.smb2.ServerMessageBlock2;
 import jcifs.internal.smb2.ServerMessageBlock2Request;
 import jcifs.internal.smb2.ServerMessageBlock2Response;
 import jcifs.internal.smb2.Smb2Constants;
+import jcifs.internal.smb2.io.Smb2ReadRequest;
 import jcifs.internal.smb2.io.Smb2ReadResponse;
 import jcifs.internal.smb2.ioctl.Smb2IoctlRequest;
 import jcifs.internal.smb2.ioctl.Smb2IoctlResponse;
@@ -972,6 +973,19 @@ class SmbTransportImpl extends Transport implements SmbTransportInternal, SmbCon
                 int size = chain.size();
                 int cost = chain.getCreditCost();
                 CommonServerMessageBlockRequest next = chain.getNext();
+                if ( this.smb2 && this.largeMtu && last == null && next == null && size <= maxSize
+                        && chain instanceof Smb2ReadRequest && ( (Smb2ReadRequest) chain ).isCreditAdjustmentAllowed() ) {
+                    // A regular-file caller accepts short reads. Waiting for the
+                    // entire configured window can deadlock when the server grants
+                    // fewer credits and there are no outstanding replies to grow it.
+                    cost = acquireReadCredits(chain, cost, params);
+                    Smb2ReadRequest read = (Smb2ReadRequest) chain;
+                    read.adjustReadLength(cost);
+                    read.setCreditCharge(cost);
+                    totalSize = size;
+                    totalCost = cost;
+                    break;
+                }
                 if ( log.isTraceEnabled() ) {
                     log.trace(
                         String.format("%s costs %d avail %d (%s)", chain.getClass().getName(), cost, this.credits.availablePermits(), this.name));
@@ -1121,6 +1135,42 @@ class SmbTransportImpl extends Transport implements SmbTransportInternal, SmbCon
         return response;
 
     }
+
+    /** Reserve up to the requested cost, without trusting a racy permit snapshot. */
+    private int tryAcquireReadCredits ( int maximum ) {
+        for ( int cost = maximum; cost > 0; cost = Math.min(cost - 1, this.credits.availablePermits()) ) {
+            if ( this.credits.tryAcquire(cost) ) {
+                return cost;
+            }
+        }
+        return 0;
+    }
+
+
+    private int acquireReadCredits ( CommonServerMessageBlockRequest request, int maximum, Set<RequestParam> params ) throws IOException {
+        int acquired = tryAcquireReadCredits(maximum);
+        if ( acquired != 0 ) {
+            return acquired;
+        }
+        // No credits: wait for just one, then take any extras without blocking.
+        // In particular, never hold credits while waiting for a larger window.
+        try {
+            if ( params.contains(RequestParam.NO_TIMEOUT) ) {
+                this.credits.acquire();
+            }
+            else if ( !this.credits.tryAcquire(1, getResponseTimeout(request), TimeUnit.MILLISECONDS) ) {
+                throw new SmbException("Failed to acquire credits in time");
+            }
+        }
+        catch ( InterruptedException e ) {
+            Thread.currentThread().interrupt();
+            InterruptedIOException ie = new InterruptedIOException("Interrupted while acquiring credits");
+            ie.initCause(e);
+            throw ie;
+        }
+        return 1 + tryAcquireReadCredits(maximum - 1);
+    }
+
 
     private <T extends CommonServerMessageBlockResponse> T setupResponses(CommonServerMessageBlockRequest request, T response) throws IOException {
         if ( request instanceof jcifs.internal.Request ) {
