@@ -59,6 +59,7 @@ public class Smb2ReadRequest extends ServerMessageBlock2Request<Smb2ReadResponse
     private int minimumCount;
     private int channel;
     private int remainingBytes;
+    private boolean allowCreditAdjustment;
 
 
     /**
@@ -125,6 +126,35 @@ public class Smb2ReadRequest extends ServerMessageBlock2Request<Smb2ReadResponse
      */
     public void setReadLength ( int readLength ) {
         this.readLength = readLength;
+    }
+
+
+    /**
+     * Allow the transport to shorten this regular-file read to its available
+     * credit window. The caller must accept a short read and advance by the
+     * number of bytes actually returned. Disabled for other READ users.
+     *
+     * @param allow whether credit-based shortening is allowed
+     */
+    public void setAllowCreditAdjustment ( boolean allow ) {
+        this.allowCreditAdjustment = allow;
+    }
+
+
+    /** @return whether this read can safely be shortened to one credit */
+    public boolean isCreditAdjustmentAllowed () {
+        return this.allowCreditAdjustment && this.minimumCount == 0 && this.channel == SMB2_CHANNEL_NONE && this.readFlags == 0;
+    }
+
+
+    /**
+     * Limit the wire length after the transport has reserved credits, before
+     * credit charging and message-ID allocation.
+     *
+     * @param credits number of credits reserved for this request (at least one)
+     */
+    public void adjustReadLength ( int credits ) {
+        this.readLength = (int) Math.min(this.readLength, credits * 65536L);
     }
 
 

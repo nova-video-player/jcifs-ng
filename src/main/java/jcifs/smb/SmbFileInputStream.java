@@ -329,6 +329,7 @@ public class SmbFileInputStream extends InputStream {
                         Smb2ReadRequest request = new Smb2ReadRequest(th.getConfig(), fd.getFileId(), b, off);
                         request.setOffset(type == SmbConstants.TYPE_NAMED_PIPE ? 0 : this.fp);
                         request.setReadLength(r);
+                        request.setAllowCreditAdjustment(type == SmbConstants.TYPE_FILESYSTEM);
                         request.setRemainingBytes(len - r);
 
                         try {
